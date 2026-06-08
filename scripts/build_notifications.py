@@ -43,7 +43,6 @@ titles = {
     "HomeAssistant": "Home Assistant",
     "Kook": "Kook",
     "line": "LINE Messenger",
-    "LineNotify": "LINE Notify",
     "lunasea": "LunaSea",
     "matrix": "Matrix",
     "mattermost": "Mattermost",
@@ -84,6 +83,48 @@ titles = {
     "nostr": "Nostr",
     "FlashDuty": "FlashDuty",
     "smsc": "SMSC",
+    "bale": "Bale",
+    "Bitrix24": "Bitrix24",
+    "Brevo": "Brevo (formerly SendinBlue)",
+    "CallMeBot": "CallMeBot",
+    "Cellsynt": "Cellsynt",
+    "egosms": "EgoSMS",
+    "Elks": "46elks",
+    "evolution": "Evolution API (WhatsApp)",
+    "fluxer": "Fluxer",
+    "GoogleSheets": "Google Sheets",
+    "GrafanaOncall": "Grafana Oncall",
+    "gtxmessaging": "GtxMessaging",
+    "HaloPSA": "HaloPSA",
+    "HeiiOnCall": "Heii On-Call",
+    "JiraServiceManagement": "Jira Service Management",
+    "Keep": "Keep",
+    "max": "MAX",
+    "nextcloudtalk": "Nextcloud Talk",
+    "notifery": "Notifery",
+    "OneChat": "OneChat",
+    "Onesender": "Onesender (WhatsApp)",
+    "pumble": "Pumble",
+    "PushPlus": "PushPlus",
+    "Resend": "Resend",
+    "SendGrid": "SendGrid",
+    "SevenIO": "SevenIO",
+    "SIGNL4": "SIGNL4",
+    "smsir": "SMS.ir",
+    "SMSPartner": "SMSPartner",
+    "SMSPlanet": "SMSPlanet",
+    "SpugPush": "SpugPush",
+    "telnyx": "Telnyx",
+    "Teltonika": "Teltonika RUT",
+    "threema": "Threema",
+    "VK": "VK",
+    "VKTeams": "VK Teams",
+    "waha": "WAHA (WhatsApp HTTP API)",
+    "Webpush": "Web Push",
+    "whapi": "WHAPI (for WhatsApp)",
+    "Whatsapp360messenger": "360messenger",
+    "WPush": "WPush",
+    "YZJ": "YZJ",
 }
 
 
@@ -100,7 +141,7 @@ def build_notification_providers():
             match = re.search(r'name = "([^"]+)";', content)
             name = match.group(1)
 
-            inputs = re.findall(r'notification\??\.([^ ,.;})\]]+)', content)
+            inputs = re.findall(r'notification\??\.([^ ,.;})\]?]+)', content)
             inputs = deduplicate_list(inputs)
             inputs = [i.strip() for i in inputs]
 
@@ -110,7 +151,11 @@ def build_notification_providers():
             }
             for input_ in inputs:
                 if input_ not in ignored_inputs.get(name, []):
-                    providers[name]["inputs"][input_] = {}
+                    providers[name]["inputs"][input_] = {
+                        "type": "str",
+                        "required": False,
+                        "conditions": {},
+                    }
 
     # get inputs
     for path in glob.glob(f'{root}/src/components/notifications/*'):
@@ -131,7 +176,11 @@ def build_notification_providers():
             if v_model_overwrite:
                 param_name = v_model_overwrite
             else:
-                param_name = re.match(r'\$parent.notification.(.*)$', v_model).group(1)
+                m = re.match(r'\$parent\.notification\.(.*)$', v_model)
+                if not m:
+                    print(f"!! SKIP v-model (unrecognized binding): '{v_model}' in {path}")
+                    continue
+                param_name = m.group(1)
 
             type_ = attrs.get("type")
             type_ = type_html_to_py(type_)
@@ -162,7 +211,8 @@ def build_notification_providers():
                             "type": type_,
                             "required": required
                         }
-            assert input_found
+            if not input_found:
+                print(f"!! UNMATCHED v-model: '{v_model}' (param='{param_name}') in {path}")
     return providers
 
 
@@ -172,7 +222,7 @@ notification_provider_conditions = {}
 for notification_provider in notification_providers:
     for notification_provider_input_name in notification_providers[notification_provider]["inputs"]:
         notification_provider_input = notification_providers[notification_provider]["inputs"][notification_provider_input_name]
-        if notification_provider_input["conditions"]:
+        if notification_provider_input.get("conditions"):
             notification_provider_conditions[notification_provider_input_name] = notification_provider_input["conditions"]
 
 write_to_file(

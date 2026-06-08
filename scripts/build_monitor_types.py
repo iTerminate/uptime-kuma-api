@@ -25,7 +25,16 @@ titles = {
     "json-query": "HTTP(s) - Json Query",
     "real-browser": "HTTP(s) - Browser Engine (Chrome/Chromium)",
     "kafka-producer": "Kafka Producer",
-    "tailscale-ping": "Tailscale Ping"
+    "tailscale-ping": "Tailscale Ping",
+    "manual": "Manual",
+    "globalping": "Globalping",
+    "rabbitmq": "RabbitMQ",
+    "sip-options": "SIP OPTIONS Ping",
+    "smtp": "SMTP",
+    "snmp": "SNMP",
+    "system-service": "System Service",
+    "websocket-upgrade": "WebSocket Upgrade",
+    "oracledb": "Oracle Database",
 }
 
 
