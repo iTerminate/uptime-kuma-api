@@ -4,11 +4,11 @@ from enum import Enum
 class MonitorType(str, Enum):
     """Enumerate monitor types."""
     
-    GROUP = "group"
-    """Group"""
-
     HTTP = "http"
     """HTTP(s)"""
+
+    KEYWORD = "keyword"
+    """HTTP(s) - Keyword"""
 
     PORT = "port"
     """TCP Port"""
@@ -16,50 +16,74 @@ class MonitorType(str, Enum):
     PING = "ping"
     """Ping"""
 
-    KEYWORD = "keyword"
-    """HTTP(s) - Keyword"""
-
-    JSON_QUERY = "json-query"
-    """HTTP(s) - Json Query"""
-
-    GRPC_KEYWORD = "grpc-keyword"
-    """gRPC(s) - Keyword"""
-
     DNS = "dns"
     """DNS"""
 
     DOCKER = "docker"
     """Docker Container"""
 
+    SYSTEM_SERVICE = "system-service"
+    """System Service"""
+
     REAL_BROWSER = "real-browser"
     """HTTP(s) - Browser Engine (Chrome/Chromium)"""
+
+    GROUP = "group"
+    """Group"""
 
     PUSH = "push"
     """Push"""
 
-    STEAM = "steam"
-    """Steam Game Server"""
+    MANUAL = "manual"
+    """Manual"""
 
-    GAMEDIG = "gamedig"
-    """GameDig"""
+    GLOBALPING = "globalping"
+    """Globalping"""
 
-    MQTT = "mqtt"
-    """MQTT"""
+    GRPC_KEYWORD = "grpc-keyword"
+    """gRPC(s) - Keyword"""
+
+    JSON_QUERY = "json-query"
+    """HTTP(s) - Json Query"""
 
     KAFKA_PRODUCER = "kafka-producer"
     """Kafka Producer"""
 
+    MQTT = "mqtt"
+    """MQTT"""
+
+    RABBITMQ = "rabbitmq"
+    """RabbitMQ"""
+
+    SIP_OPTIONS = "sip-options"
+    """SIP OPTIONS Ping"""
+
+    SMTP = "smtp"
+    """SMTP"""
+
+    SNMP = "snmp"
+    """SNMP"""
+
+    TAILSCALE_PING = "tailscale-ping"
+    """Tailscale Ping"""
+
+    WEBSOCKET_UPGRADE = "websocket-upgrade"
+    """WebSocket Upgrade"""
+
     SQLSERVER = "sqlserver"
     """Microsoft SQL Server"""
 
-    POSTGRES = "postgres"
-    """PostgreSQL"""
+    MONGODB = "mongodb"
+    """MongoDB"""
 
     MYSQL = "mysql"
     """MySQL/MariaDB"""
 
-    MONGODB = "mongodb"
-    """MongoDB"""
+    ORACLEDB = "oracledb"
+    """Oracle Database"""
+
+    POSTGRES = "postgres"
+    """PostgreSQL"""
 
     RADIUS = "radius"
     """Radius"""
@@ -67,5 +91,8 @@ class MonitorType(str, Enum):
     REDIS = "redis"
     """Redis"""
 
-    TAILSCALE_PING = "tailscale-ping"
-    """Tailscale Ping"""
+    GAMEDIG = "gamedig"
+    """GameDig"""
+
+    STEAM = "steam"
+    """Steam Game Server"""
