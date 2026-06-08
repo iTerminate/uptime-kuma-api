@@ -1,0 +1,42 @@
+{% set name = "uptime-kuma-api" %}
+{% set version_match = load_file_regex(
+    load_file="../uptime_kuma_api/__version__.py",
+    regex_pattern='__version__\s*=\s*[\'"]([^\'"]+)[\'"]',
+    from_recipe_dir=True) %}
+{% set version = version_match[1] %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.7,<4
+    - pip
+    - setuptools
+  run:
+    - python >=3.7,<4
+    - python-socketio >=5.0.0
+    - websocket-client >=0.54.0
+    - requests >=2.21.0
+    - packaging
+
+test:
+  imports:
+    - uptime_kuma_api
+
+about:
+  home: https://github.com/lucasheld/uptime-kuma-api
+  license: MIT
+  license_file: LICENSE
+  summary: A python wrapper for the Uptime Kuma WebSocket API
+  dev_url: https://github.com/lucasheld/uptime-kuma-api
+  doc_url: https://uptime-kuma-api.readthedocs.io
