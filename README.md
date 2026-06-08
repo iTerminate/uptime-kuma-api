@@ -10,10 +10,11 @@ Python version 3.7+ is required.
 
 Supported Uptime Kuma versions:
 
-| Uptime Kuma     | uptime-kuma-api |
-|-----------------|-----------------|
-| 1.21.3 - 1.23.2 | 1.0.0 - 1.2.1   |
-| 1.17.0 - 1.21.2 | 0.1.0 - 0.13.0  |
+| Uptime Kuma      | uptime-kuma-api |
+|------------------|-----------------|
+| 2.0.0 - 2.4.0    | 2.4.0           |
+| 1.21.3 - 1.23.17 | 1.0.0 - 1.2.1   |
+| 1.17.0 - 1.21.2  | 0.1.0 - 0.13.0  |
 
 Installation
 ---
