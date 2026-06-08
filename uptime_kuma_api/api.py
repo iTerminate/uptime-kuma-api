@@ -137,6 +137,8 @@ def _convert_monitor_input(kwargs) -> None:
             kwargs["databaseConnectionString"] = "redis://user:password@host:port"
         elif kwargs["type"] == MonitorType.MONGODB:
             kwargs["databaseConnectionString"] = "mongodb://username:password@host:port/database"
+        elif kwargs.get("type") == MonitorType.ORACLEDB:
+            kwargs["databaseConnectionString"] = "oracledb://username:password@host:port/service"
 
     if kwargs["type"] == MonitorType.PUSH and not kwargs.get("pushToken"):
         kwargs["pushToken"] = gen_secret(10)
@@ -283,6 +285,16 @@ def _check_arguments_monitor(kwargs) -> None:
         MonitorType.REAL_BROWSER: ["url"],
         MonitorType.KAFKA_PRODUCER: ["kafkaProducerTopic", "kafkaProducerMessage"],
         MonitorType.TAILSCALE_PING: ["hostname"],
+        # 2.x
+        MonitorType.ORACLEDB: ["databaseConnectionString"],
+        MonitorType.RABBITMQ: ["rabbitmqNodes", "rabbitmqUsername", "rabbitmqPassword"],
+        MonitorType.SMTP: ["hostname", "port"],
+        MonitorType.SNMP: ["hostname", "snmpOid", "snmpVersion", "jsonPath", "jsonPathOperator", "expectedValue"],
+        MonitorType.MANUAL: [],
+        MonitorType.SYSTEM_SERVICE: ["system_service_name"],
+        MonitorType.SIP_OPTIONS: ["hostname", "port"],
+        MonitorType.WEBSOCKET_UPGRADE: ["url"],
+        MonitorType.GLOBALPING: ["subtype"],
     }
     type_ = kwargs["type"]
     required_args = required_args_by_type[type_]
@@ -485,7 +497,8 @@ class UptimeKumaApi(object):
             Event.DOCKER_HOST_LIST: None,
             Event.AUTO_LOGIN: None,
             Event.MAINTENANCE_LIST: None,
-            Event.API_KEY_LIST: None
+            Event.API_KEY_LIST: None,
+            Event.REMOTE_BROWSER_LIST: None,
         }
 
         self.sio.on(Event.CONNECT, self._event_connect)
@@ -506,6 +519,12 @@ class UptimeKumaApi(object):
         self.sio.on(Event.INIT_SERVER_TIMEZONE, self._event_init_server_timezone)
         self.sio.on(Event.MAINTENANCE_LIST, self._event_maintenance_list)
         self.sio.on(Event.API_KEY_LIST, self._event_api_key_list)
+        self.sio.on(Event.REMOTE_BROWSER_LIST, self._event_remote_browser_list)
+        # 2.x delta events — server replaced full monitorList emits on add/
+        # edit/delete with these per-monitor deltas. Apply them to the cached
+        # MONITOR_LIST so callers (and wait_for_event) see the update.
+        self.sio.on(Event.UPDATE_MONITOR_INTO_LIST, self._event_update_monitor_into_list)
+        self.sio.on(Event.DELETE_MONITOR_FROM_LIST, self._event_delete_monitor_from_list)
 
         self.connect()
 
@@ -517,15 +536,22 @@ class UptimeKumaApi(object):
 
     @contextmanager
     def wait_for_event(self, event: Event) -> None:
-        # waits for the first event of the given type to arrive
+        # waits for the next event of the given type to arrive after the
+        # wrapped action runs. Pre-2.x Uptime Kuma only emitted list-style
+        # events on changes, so "wait until the cache is non-None" was
+        # equivalent to "wait for the change to be reflected". 2.x emits an
+        # initial empty list on login, which would cause this wait to return
+        # immediately with stale data, so we snapshot the current cache value
+        # and wait for it to actually differ.
 
+        snapshot = deepcopy(self._event_data.get(event))
         try:
             yield
         except:
             raise
         else:
             timestamp = time.time()
-            while self._event_data[event] is None:
+            while self._event_data[event] is None or self._event_data[event] == snapshot:
                 if time.time() - timestamp > self.timeout:
                     raise Timeout(f"Timed out while waiting for event {event}")
                 time.sleep(0.01)
@@ -652,6 +678,25 @@ class UptimeKumaApi(object):
 
     def _event_api_key_list(self, data) -> None:
         self._event_data[Event.API_KEY_LIST] = data
+
+    def _event_remote_browser_list(self, data) -> None:
+        self._event_data[Event.REMOTE_BROWSER_LIST] = data
+
+    def _event_update_monitor_into_list(self, data) -> None:
+        # 2.x delta: {monitorID: monitor_dict} for one or more monitors
+        if self._event_data[Event.MONITOR_LIST] is None:
+            self._event_data[Event.MONITOR_LIST] = {}
+        if isinstance(data, dict):
+            self._event_data[Event.MONITOR_LIST].update(data)
+
+    def _event_delete_monitor_from_list(self, monitor_id) -> None:
+        # 2.x delta: just the monitor id to remove
+        if self._event_data[Event.MONITOR_LIST] is None:
+            self._event_data[Event.MONITOR_LIST] = {}
+        # the server sends ids as ints; the cache may use stringified keys
+        for k in (monitor_id, str(monitor_id), int(monitor_id) if isinstance(monitor_id, str) and monitor_id.isdigit() else None):
+            if k is not None and k in self._event_data[Event.MONITOR_LIST]:
+                del self._event_data[Event.MONITOR_LIST][k]
 
     # connection
 
@@ -790,6 +835,44 @@ class UptimeKumaApi(object):
             kafkaProducerSsl: bool = False,
             kafkaProducerAllowAutoTopicCreation: bool = False,
             kafkaProducerSaslOptions: dict = None,
+
+            # 2.x — universal additions
+            conditions: list = None,
+            ipFamily: str = None,
+            cacheBust: bool = False,
+
+            # 2.x — bearer / extra OAuth
+            bearer_token: str = None,
+            oauth_audience: str = None,
+
+            # GAMEDIG (2.x)
+            gamedigToken: str = "",
+
+            # SMTP (monitor) / SNMP / WEBSOCKET_UPGRADE
+            smtpSecurity: str = "autotls",
+            expectedTlsAlert: str = None,
+
+            # SNMP
+            snmpOid: str = None,
+            snmpVersion: str = "2c",
+            snmpV3Username: str = None,
+            jsonPathOperator: str = "==",
+
+            # WEBSOCKET_UPGRADE
+            wsIgnoreSecWebsocketAcceptHeader: bool = False,
+            wsSubprotocol: str = "",
+
+            # SYSTEM_SERVICE
+            system_service_name: str = None,
+
+            # RABBITMQ
+            rabbitmqNodes: list[str] = None,
+            rabbitmqUsername: str = None,
+            rabbitmqPassword: str = None,
+
+            # GLOBALPING / HTTP subtype handling
+            subtype: str = None,
+            location: str = None,
     ) -> dict:
         if accepted_statuscodes is None:
             accepted_statuscodes = ["200-299"]
@@ -985,6 +1068,95 @@ class UptimeKumaApi(object):
                 "kafkaProducerAllowAutoTopicCreation": kafkaProducerAllowAutoTopicCreation,
                 "kafkaProducerSaslOptions": kafkaProducerSaslOptions,
             })
+
+        # 2.x universal additions — only sent when the server is new enough to know about them
+        if parse_version(self.version) >= parse_version("2.0.0"):
+            if conditions is None:
+                conditions = []
+            data.update({
+                "conditions": conditions,
+                "ipFamily": ipFamily,
+                "cacheBust": cacheBust,
+            })
+
+        # BEARER auth
+        if authMethod == AuthMethod.BEARER:
+            data.update({
+                "bearer_token": bearer_token,
+            })
+
+        # extra OAuth field (sent regardless of authMethod when OAuth2-CC is selected)
+        if authMethod == AuthMethod.OAUTH2_CC and parse_version(self.version) >= parse_version("2.0.0"):
+            data.update({
+                "oauth_audience": oauth_audience,
+            })
+
+        # GAMEDIG (2.x added token)
+        if type == MonitorType.GAMEDIG and parse_version(self.version) >= parse_version("2.0.0"):
+            data.update({
+                "gamedigToken": gamedigToken,
+            })
+
+        # SMTP monitor
+        if type == MonitorType.SMTP:
+            data.update({
+                "smtpSecurity": smtpSecurity,
+                "expectedTlsAlert": expectedTlsAlert,
+            })
+
+        # SNMP
+        if type == MonitorType.SNMP:
+            data.update({
+                "snmpOid": snmpOid,
+                "snmpVersion": snmpVersion,
+                "snmpV3Username": snmpV3Username,
+                "jsonPath": jsonPath,
+                "jsonPathOperator": jsonPathOperator,
+                "expectedValue": expectedValue,
+            })
+
+        # WEBSOCKET_UPGRADE
+        if type == MonitorType.WEBSOCKET_UPGRADE:
+            data.update({
+                "wsIgnoreSecWebsocketAcceptHeader": wsIgnoreSecWebsocketAcceptHeader,
+                "wsSubprotocol": wsSubprotocol,
+            })
+
+        # SYSTEM_SERVICE
+        if type == MonitorType.SYSTEM_SERVICE:
+            data.update({
+                "system_service_name": system_service_name,
+            })
+
+        # RABBITMQ
+        if type == MonitorType.RABBITMQ:
+            if rabbitmqNodes is None:
+                rabbitmqNodes = []
+            data.update({
+                "rabbitmqNodes": rabbitmqNodes,
+                "rabbitmqUsername": rabbitmqUsername,
+                "rabbitmqPassword": rabbitmqPassword,
+            })
+
+        # ORACLEDB
+        if type == MonitorType.ORACLEDB:
+            data.update({
+                "databaseConnectionString": databaseConnectionString,
+                "databaseQuery": databaseQuery,
+                "basic_auth_user": basic_auth_user,
+                "basic_auth_pass": basic_auth_pass,
+            })
+
+        # GLOBALPING / subtype routing
+        if type in [MonitorType.GLOBALPING, MonitorType.HTTP, MonitorType.KEYWORD, MonitorType.JSON_QUERY]:
+            data.update({
+                "subtype": subtype,
+            })
+        if type == MonitorType.GLOBALPING:
+            data.update({
+                "location": location,
+            })
+
         return data
 
     def _build_maintenance_data(
@@ -1055,7 +1227,15 @@ class UptimeKumaApi(object):
             showCertificateExpiry: bool = False,
 
             icon: str = "/icon.svg",
-            publicGroupList: list = None
+            publicGroupList: list = None,
+
+            # 2.x additions
+            autoRefreshInterval: int = 300,
+            analyticsId: str = None,
+            analyticsScriptUrl: str = None,
+            analyticsType: str = None,
+            showOnlyLastHeartbeat: bool = False,
+            rssTitle: str = None,
     ) -> tuple[str, dict, str, list]:
         if not theme:
             if parse_version(self.version) >= parse_version("1.22"):
@@ -1086,6 +1266,18 @@ class UptimeKumaApi(object):
         if parse_version(self.version) >= parse_version("1.23"):
             config.update({
                 "showCertificateExpiry": showCertificateExpiry,
+            })
+        if parse_version(self.version) >= parse_version("2.0.0"):
+            # 2.x validates `analyticsType` server-side: must be null or one of
+            # google/umami/plausible/matomo. We send null when unset rather
+            # than omitting the key.
+            config.update({
+                "autoRefreshInterval": autoRefreshInterval,
+                "analyticsId": analyticsId,
+                "analyticsScriptUrl": analyticsScriptUrl,
+                "analyticsType": analyticsType,
+                "showOnlyLastHeartbeat": showOnlyLastHeartbeat,
+                "rssTitle": rssTitle,
             })
         return slug, config, icon, publicGroupList
 
@@ -2002,21 +2194,44 @@ class UptimeKumaApi(object):
             }
         """
         r1 = self._call('getStatusPage', slug)
+        # 2.x wraps this REST endpoint in apicache("5 minutes"), so without a
+        # cache-buster a fresh call after a save / incident change would
+        # return stale data.
         try:
-            r2 = requests.get(f"{self.url}/api/status-page/{slug}", timeout=self.timeout).json()
+            cache_bust = int(time.time() * 1000)
+            r2 = requests.get(
+                f"{self.url}/api/status-page/{slug}",
+                params={"_": cache_bust},
+                timeout=self.timeout,
+            ).json()
         except requests.exceptions.Timeout as e:
             raise Timeout(e)
 
         config = r1["config"]
         config.update(r2["config"])
 
+        # In 1.x the REST endpoint returns a single `incident` (or null); in 2.x
+        # it returns an `incidents` array. Surface both shapes for back-compat:
+        # `incidents` always holds the full list; `incident` holds the pinned/
+        # first one (or None) for callers written against 1.x.
+        if "incidents" in r2:
+            incidents = r2.get("incidents") or []
+            incident = incidents[0] if incidents else None
+        else:
+            incident = r2.get("incident")
+            incidents = [incident] if incident else []
+
         data = {
             **config,
-            "incident": r2["incident"],
+            "incident": incident,
+            "incidents": incidents,
             "publicGroupList": r2["publicGroupList"],
             "maintenanceList": r2["maintenanceList"]
         }
-        parse_incident_style(data["incident"])
+        if data["incident"]:
+            parse_incident_style(data["incident"])
+        for inc in data["incidents"]:
+            parse_incident_style(inc)
         # convert sendUrl from int to bool
         for i in data["publicGroupList"]:
             for j in i["monitorList"]:
@@ -2040,8 +2255,17 @@ class UptimeKumaApi(object):
                 'msg': 'OK!'
             }
         """
-        with self.wait_for_event(Event.STATUS_PAGE_LIST):
-            return self._call('addStatusPage', (title, slug))
+        r = self._call('addStatusPage', (title, slug))
+        # 2.x doesn't emit statusPageList on add; manually refresh the cache
+        # so a subsequent get_status_pages() sees the new entry.
+        try:
+            config = self._call('getStatusPage', slug)["config"]
+            if self._event_data[Event.STATUS_PAGE_LIST] is None:
+                self._event_data[Event.STATUS_PAGE_LIST] = {}
+            self._event_data[Event.STATUS_PAGE_LIST][str(config["id"])] = config
+        except Exception:
+            pass
+        return r
 
     def delete_status_page(self, slug: str) -> dict:
         """
@@ -2128,8 +2352,10 @@ class UptimeKumaApi(object):
             }
         """
         status_page = self.get_status_page(slug)
-        status_page.pop("incident")
-        status_page.pop("maintenanceList")
+        # `incident` / `incidents` / `maintenanceList` are read-only on the
+        # config; _build_status_page_data doesn't accept them as kwargs.
+        for k in ("incident", "incidents", "maintenanceList"):
+            status_page.pop(k, None)
         status_page.update(kwargs)
         data = self._build_status_page_data(**status_page)
         r = self._call('saveStatusPage', data)
@@ -2184,7 +2410,6 @@ class UptimeKumaApi(object):
             "style": style
         }
         r = self._call('postIncident', (slug, incident))["incident"]
-        self.save_status_page(slug)
         parse_incident_style(r)
         return r
 
@@ -2202,9 +2427,7 @@ class UptimeKumaApi(object):
             >>> api.unpin_incident(slug="slug1")
             {}
         """
-        r = self._call('unpinIncident', slug)
-        self.save_status_page(slug)
-        return r
+        return self._call('unpinIncident', slug)
 
     # heartbeat
 
@@ -3947,6 +4170,339 @@ class UptimeKumaApi(object):
             if id_ not in [i["id"] for i in self.get_api_keys()]:
                 raise UptimeKumaException("api key does not exist")
             return self._call('deleteAPIKey', id_)
+
+    # remote browser (Uptime Kuma 2.x)
+
+    def get_remote_browsers(self) -> list[dict]:
+        """
+        Get all remote browser endpoints registered for the :attr:`~.MonitorType.REAL_BROWSER` monitor type.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :return: All remote browsers.
+        :rtype: list
+        """
+        return self._get_event_data(Event.REMOTE_BROWSER_LIST) or []
+
+    def get_remote_browser(self, id_: int) -> dict:
+        """
+        Get a remote browser by id.
+
+        :param int id_: Id of the remote browser.
+        :return: The remote browser.
+        :rtype: dict
+        :raises UptimeKumaException: If the remote browser does not exist.
+        """
+        for rb in self.get_remote_browsers():
+            if rb.get("id") == id_:
+                return rb
+        raise UptimeKumaException("remote browser does not exist")
+
+    def test_remote_browser(self, url: str) -> dict:
+        """
+        Test a remote browser endpoint.
+
+        :param str url: Remote browser URL (e.g. ``ws://localhost:3000``).
+        :return: The server response.
+        :rtype: dict
+        :raises UptimeKumaException: If the server returns an error.
+        """
+        return self._call('testRemoteBrowser', {"url": url})
+
+    def add_remote_browser(self, name: str, url: str) -> dict:
+        """
+        Add a remote browser endpoint.
+
+        :param str name: Friendly name.
+        :param str url: Remote browser URL.
+        :return: The server response.
+        :rtype: dict
+        :raises UptimeKumaException: If the server returns an error.
+        """
+        data = {"name": name, "url": url}
+        with self.wait_for_event(Event.REMOTE_BROWSER_LIST):
+            return self._call('addRemoteBrowser', (data, None))
+
+    def edit_remote_browser(self, id_: int, name: str = None, url: str = None) -> dict:
+        """
+        Edit an existing remote browser endpoint.
+
+        :param int id_: Id of the remote browser to edit.
+        :param str, optional name: New friendly name. If ``None``, the existing name is kept.
+        :param str, optional url: New URL. If ``None``, the existing URL is kept.
+        :return: The server response.
+        :rtype: dict
+        :raises UptimeKumaException: If the server returns an error.
+        """
+        rb = self.get_remote_browser(id_)
+        if name is not None:
+            rb["name"] = name
+        if url is not None:
+            rb["url"] = url
+        data = {"name": rb["name"], "url": rb["url"]}
+        with self.wait_for_event(Event.REMOTE_BROWSER_LIST):
+            return self._call('addRemoteBrowser', (data, id_))
+
+    def delete_remote_browser(self, id_: int) -> dict:
+        """
+        Delete a remote browser.
+
+        :param int id_: Id of the remote browser to delete.
+        :return: The server response.
+        :rtype: dict
+        :raises UptimeKumaException: If the server returns an error.
+        """
+        with self.wait_for_event(Event.REMOTE_BROWSER_LIST):
+            return self._call('deleteRemoteBrowser', id_)
+
+    # cloudflared tunnel (Uptime Kuma 2.x)
+
+    def cloudflared_join(self) -> None:
+        """
+        Join the cloudflared room so the server starts streaming tunnel
+        status events to this socket. Required before calling any other
+        ``cloudflared_*`` method.
+
+        Available since Uptime Kuma 2.0.0.
+        """
+        self.sio.emit('cloudflared_join')
+
+    def cloudflared_leave(self) -> None:
+        """
+        Leave the cloudflared room.
+        """
+        self.sio.emit('cloudflared_leave')
+
+    def cloudflared_start(self, token: str = None) -> None:
+        """
+        Start the cloudflared tunnel. If a token is supplied it is persisted
+        in settings and used for the tunnel; otherwise the previously stored
+        token is used.
+
+        :param str, optional token: Cloudflare tunnel token.
+        """
+        self.sio.emit('cloudflared_start', token)
+
+    def cloudflared_stop(self, current_password: str = None) -> dict:
+        """
+        Stop the cloudflared tunnel. The server requires the current admin
+        password to confirm the action unless authentication is disabled.
+
+        :param str, optional current_password: Current admin password.
+        :return: The server response.
+        :rtype: dict
+        :raises UptimeKumaException: If the server returns an error.
+        """
+        return self._call('cloudflared_stop', current_password)
+
+    def cloudflared_remove_token(self) -> None:
+        """
+        Clear the stored cloudflared tunnel token.
+        """
+        self.sio.emit('cloudflared_removeToken')
+
+    # status-page incidents (Uptime Kuma 2.x)
+
+    def edit_incident(
+            self,
+            slug: str,
+            incident_id: int,
+            title: str,
+            content: str,
+            style: IncidentStyle = IncidentStyle.PRIMARY,
+            pin: bool = True,
+    ) -> dict:
+        """
+        Edit an existing incident on a status page.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param str slug: Status page slug.
+        :param int incident_id: Id of the incident to edit (see :func:`get_incident_history`).
+        :param str title: New title.
+        :param str content: New content.
+        :param IncidentStyle, optional style: Incident style, defaults to :attr:`~.IncidentStyle.PRIMARY`.
+        :param bool, optional pin: Keep the incident pinned, defaults to True.
+        :return: The updated incident.
+        :rtype: dict
+        """
+        incident = {"title": title, "content": content, "style": style, "pin": pin}
+        r = self._call('editIncident', (slug, incident_id, incident))
+        if isinstance(r, dict) and r.get("incident"):
+            parse_incident_style(r["incident"])
+            return r["incident"]
+        return r
+
+    def delete_incident(self, slug: str, incident_id: int) -> dict:
+        """
+        Delete an incident from a status page.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param str slug: Status page slug.
+        :param int incident_id: Id of the incident to delete.
+        :return: The server response.
+        :rtype: dict
+        """
+        return self._call('deleteIncident', (slug, incident_id))
+
+    def resolve_incident(self, slug: str, incident_id: int) -> dict:
+        """
+        Mark an incident as resolved on a status page.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param str slug: Status page slug.
+        :param int incident_id: Id of the incident to resolve.
+        :return: The resolved incident.
+        :rtype: dict
+        """
+        r = self._call('resolveIncident', (slug, incident_id))
+        if isinstance(r, dict) and r.get("incident"):
+            parse_incident_style(r["incident"])
+            return r["incident"]
+        return r
+
+    def get_incident_history(self, slug: str, cursor: str = None) -> dict:
+        """
+        Get the incident history for a status page. Returns a paginated dict
+        ``{"incidents": [...], "nextCursor": "..."}``; pass ``nextCursor`` back
+        as the ``cursor`` argument to fetch the next page.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param str slug: Status page slug.
+        :param str, optional cursor: Pagination cursor returned by a previous
+                                     call, defaults to None (first page).
+        :return: ``{"incidents": [...], "nextCursor": "..." | None}``.
+        :rtype: dict
+        """
+        r = self._call('getIncidentHistory', (slug, cursor))
+        if not isinstance(r, dict):
+            return {"incidents": [], "nextCursor": None}
+        incidents = r.get("incidents", [])
+        for inc in incidents:
+            parse_incident_style(inc)
+        return {"incidents": incidents, "nextCursor": r.get("nextCursor")}
+
+    # chart / paged heartbeats (Uptime Kuma 2.x)
+
+    def get_monitor_chart_data(self, monitor_id: int, period: int = 24) -> dict:
+        """
+        Get aggregated chart data for a monitor over the past ``period`` hours.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param int monitor_id: Id of the monitor.
+        :param int period: Period in hours, defaults to ``24``.
+        :return: The server response.
+        :rtype: dict
+        """
+        return self._call('getMonitorChartData', (monitor_id, period))
+
+    def monitor_important_heartbeat_list_count(self, monitor_id: int) -> int:
+        """
+        Get the total number of important heartbeats for a monitor (used to
+        paginate the new important-heartbeat API).
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param int monitor_id: Id of the monitor.
+        :return: Count of important heartbeats.
+        :rtype: int
+        """
+        r = self._call('monitorImportantHeartbeatListCount', monitor_id)
+        if isinstance(r, dict):
+            return r.get("count", 0)
+        return r or 0
+
+    def monitor_important_heartbeat_list_paged(self, monitor_id: int, offset: int = 0, count: int = 25) -> list[dict]:
+        """
+        Get a page of important heartbeats for a monitor.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param int monitor_id: Id of the monitor.
+        :param int offset: Page offset, defaults to ``0``.
+        :param int count: Page size, defaults to ``25``.
+        :return: A list of important heartbeats.
+        :rtype: list
+        """
+        r = self._call('monitorImportantHeartbeatListPaged', (monitor_id, offset, count))
+        if isinstance(r, dict):
+            data = r.get("data", [])
+        else:
+            data = r or []
+        int_to_bool(data, ["important"])
+        parse_monitor_status(data)
+        return data
+
+    # misc 2.x
+
+    def check_domain(self, partial: dict) -> dict:
+        """
+        Ask the server whether domain-expiry / WHOIS checks are supported for
+        a given (partial) monitor configuration and which TLD/domain would be
+        queried.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param dict partial: A partial monitor dict with at least ``type`` and
+                             one of ``url``, ``hostname``, ``grpcUrl`` depending
+                             on the monitor type, e.g.::
+
+                                 {"type": "http", "url": "https://example.com"}
+
+        :return: ``{"domain": "...", "tld": "..."}`` describing the target.
+        :rtype: dict
+        :raises UptimeKumaException: If the monitor type is not supported for
+                                     domain expiry, the target is missing, or
+                                     the TLD has no RDAP endpoint.
+        """
+        return self._call('checkDomain', partial)
+
+    def get_push_example(self, language: str = "bash-curl") -> str:
+        """
+        Get an example push request snippet from the server.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :param str language: Snippet language. Built-in choices are
+            ``"bash-curl"`` (default), ``"csharp"``, ``"docker"``, ``"go"``,
+            ``"java"``, ``"javascript-fetch"``, ``"php"``, ``"powershell"``,
+            ``"python"``, ``"typescript-fetch"``.
+        :return: The example snippet.
+        :rtype: str
+        :raises UptimeKumaException: If the language is unknown to the server.
+        """
+        r = self._call('getPushExample', language)
+        if isinstance(r, dict):
+            return r.get("code", "")
+        return r or ""
+
+    def disconnect_other_socket_clients(self) -> None:
+        """
+        Disconnect every other socket client currently logged in as this user.
+
+        This event is fire-and-forget on the server — no ack is sent.
+
+        Available since Uptime Kuma 2.0.0.
+        """
+        self.sio.emit('disconnectOtherSocketClients')
+
+    def get_webpush_vapid_public_key(self) -> str:
+        """
+        Get the server's public VAPID key for the ``WEBPUSH`` notification provider.
+
+        Available since Uptime Kuma 2.0.0.
+
+        :return: The public VAPID key, base64-url encoded.
+        :rtype: str
+        """
+        r = self._call('getWebpushVapidPublicKey')
+        if isinstance(r, dict):
+            return r.get("publicKey", "")
+        return r or ""
 
     # helper methods
 
