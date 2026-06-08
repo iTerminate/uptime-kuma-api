@@ -35,12 +35,13 @@ class TestStatusPage(UptimeKumaTestCase):
                     ]
                 }
             ],
-            "googleAnalyticsId": ""
+            # googleAnalyticsId was renamed to analyticsId in Uptime Kuma 2.x
+            "analyticsId": None,
         }
 
         # add status page
         r = self.api.add_status_page(slug, expected_status_page["title"])
-        self.assertEqual(r["msg"], "OK!")
+        self.assertEqual(r["msg"], "successAdded")
 
         # save status page
         self.api.save_status_page(**expected_status_page)

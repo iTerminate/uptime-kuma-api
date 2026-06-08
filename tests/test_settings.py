@@ -1,6 +1,8 @@
 import json
 import unittest
 
+from packaging.version import parse as parse_version
+
 from uptime_kuma_test_case import UptimeKumaTestCase
 
 
@@ -23,11 +25,11 @@ class TestSettings(UptimeKumaTestCase):
 
         # set settings
         r = self.api.set_settings(self.password, **expected_settings)
-        self.assertEqual(r["msg"], "Saved")
+        self.assertEqual(r["msg"], "Saved.")
 
         # set settings without password
         r = self.api.set_settings(**expected_settings)
-        self.assertEqual(r["msg"], "Saved")
+        self.assertEqual(r["msg"], "Saved.")
 
         # get settings
         settings = self.api.get_settings()
@@ -38,7 +40,7 @@ class TestSettings(UptimeKumaTestCase):
 
         # change password
         r = self.api.change_password(self.password, new_password)
-        self.assertEqual(r["msg"], "Password has been updated successfully.")
+        self.assertEqual(r["msg"], "successAuthChangePassword")
 
         # check login
         r = self.api.login(self.username, new_password)
@@ -46,9 +48,11 @@ class TestSettings(UptimeKumaTestCase):
 
         # restore password
         r = self.api.change_password(new_password, self.password)
-        self.assertEqual(r["msg"], "Password has been updated successfully.")
+        self.assertEqual(r["msg"], "successAuthChangePassword")
 
     def test_upload_backup(self):
+        if parse_version(self.api.version) >= parse_version("2.0.0"):
+            self.skipTest("uploadBackup event was removed in Uptime Kuma 2.0.0")
         data = {
             "version": "1.17.1",
             "notificationList": [],

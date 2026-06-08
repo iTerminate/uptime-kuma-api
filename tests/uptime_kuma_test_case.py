@@ -1,9 +1,27 @@
+import os
+import time
 import unittest
 import warnings
 
-from uptime_kuma_api import UptimeKumaApi, MonitorType, DockerType
+from uptime_kuma_api import UptimeKumaApi, MonitorType, DockerType, UptimeKumaException
 
 token = None
+
+
+def _login_with_retry(api, username, password, attempts=5, backoff=4.0):
+    """Uptime Kuma 2.x rate-limits `login` to 20/min — retry on that error
+    with exponential-ish backoff so a long suite can run on a dev server."""
+    last = None
+    for i in range(attempts):
+        try:
+            return api.login(username, password)
+        except UptimeKumaException as e:
+            last = e
+            if "frequently" in str(e).lower():
+                time.sleep(backoff * (i + 1))
+                continue
+            raise
+    raise last
 
 
 def compare(subset, superset):
@@ -30,23 +48,30 @@ def compare(subset, superset):
 
 class UptimeKumaTestCase(unittest.TestCase):
     api = None
-    url = "http://127.0.0.1:3001"
-    username = "admin"
-    password = "secret123"
+    url = os.environ.get("UPTIME_KUMA_URL", "http://127.0.0.1:3001")
+    username = os.environ.get("UPTIME_KUMA_USERNAME", "admin")
+    password = os.environ.get("UPTIME_KUMA_PASSWORD", "secret123")
 
     def setUp(self):
         warnings.simplefilter("ignore", ResourceWarning)
 
-        self.api = UptimeKumaApi(self.url, timeout=1, wait_events=0.01)
+        # 1s was fine against the official docker image; bump for a dev server.
+        self.api = UptimeKumaApi(self.url, timeout=10, wait_events=0.05)
 
         global token
         if not token:
             if self.api.need_setup():
                 self.api.setup(self.username, self.password)
-            r = self.api.login(self.username, self.password)
+            r = _login_with_retry(self.api, self.username, self.password)
             token = r["token"]
 
-        self.api.login_by_token(token)
+        # token can be invalidated by tests that log out / change password / toggle 2FA
+        try:
+            self.api.login_by_token(token)
+        except UptimeKumaException:
+            r = _login_with_retry(self.api, self.username, self.password)
+            token = r["token"]
+            self.api.login_by_token(token)
 
         # delete monitors
         monitors = self.api.get_monitors()
@@ -90,8 +115,13 @@ class UptimeKumaTestCase(unittest.TestCase):
 
         # login again to receive initial messages
         self.api.disconnect()
-        self.api = UptimeKumaApi(self.url)
-        self.api.login_by_token(token)
+        self.api = UptimeKumaApi(self.url, timeout=10, wait_events=0.05)
+        try:
+            self.api.login_by_token(token)
+        except UptimeKumaException:
+            global_token = _login_with_retry(self.api, self.username, self.password)["token"]
+            globals()["token"] = global_token
+            self.api.login_by_token(global_token)
 
     def tearDown(self):
         self.api.disconnect()

@@ -27,7 +27,7 @@ class TestMonitor(UptimeKumaTestCase):
 
         # add monitor
         r = self.api.add_monitor(**expected_monitor)
-        self.assertEqual(r["msg"], "Added Successfully.")
+        self.assertEqual(r["msg"], "successAdded")
         monitor_id = r["monitorID"]
 
         # get monitor
@@ -56,25 +56,30 @@ class TestMonitor(UptimeKumaTestCase):
 
         # pause monitor
         r = self.api.pause_monitor(monitor_id)
-        self.assertEqual(r["msg"], "Paused Successfully.")
+        self.assertEqual(r["msg"], "successPaused")
 
         # resume monitor
         r = self.api.resume_monitor(monitor_id)
-        self.assertEqual(r["msg"], "Resumed Successfully.")
+        self.assertEqual(r["msg"], "successResumed")
 
-        # get monitor beats
-        r = self.api.get_monitor_beats(monitor_id, 6)
+        # get monitor beats — wait for the first beat to land
+        import time as _time
+        for _ in range(50):
+            r = self.api.get_monitor_beats(monitor_id, 6)
+            if r:
+                break
+            _time.sleep(0.2)
         self.assertTrue(type(r[0]["status"]) == MonitorStatus)
 
         # delete monitor
         r = self.api.delete_monitor(monitor_id)
-        self.assertEqual(r["msg"], "Deleted Successfully.")
+        self.assertEqual(r["msg"], "successDeleted")
         with self.assertRaises(UptimeKumaException):
             self.api.get_monitor(monitor_id)
 
     def do_test_monitor_type(self, expected_monitor):
         r = self.api.add_monitor(**expected_monitor)
-        self.assertEqual(r["msg"], "Added Successfully.")
+        self.assertEqual(r["msg"], "successAdded")
         monitor_id = r["monitorID"]
 
         monitor = self.api.get_monitor(monitor_id)
