@@ -4,6 +4,7 @@ import datetime
 import json
 import random
 import string
+import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
@@ -499,7 +500,18 @@ class UptimeKumaApi(object):
             Event.MAINTENANCE_LIST: None,
             Event.API_KEY_LIST: None,
             Event.REMOTE_BROWSER_LIST: None,
+            Event.HEARTBEAT: None,
         }
+        # one threading.Event per slot, set by the corresponding handler.
+        # wait_for_event clears + waits on these instead of polling+deepcopy,
+        # which makes the wait O(1) regardless of monitor count.
+        self._event_signals: dict = {
+            event: threading.Event() for event in self._event_data
+        }
+        # single lock guarding all _event_data writes and read snapshots.
+        # contention is negligible (handlers are short, reads are rare),
+        # and one lock is simpler than per-slot locks.
+        self._event_lock = threading.RLock()
 
         self.sio.on(Event.CONNECT, self._event_connect)
         self.sio.on(Event.DISCONNECT, self._event_disconnect)
@@ -536,25 +548,30 @@ class UptimeKumaApi(object):
 
     @contextmanager
     def wait_for_event(self, event: Event) -> None:
-        # waits for the next event of the given type to arrive after the
-        # wrapped action runs. Pre-2.x Uptime Kuma only emitted list-style
-        # events on changes, so "wait until the cache is non-None" was
-        # equivalent to "wait for the change to be reflected". 2.x emits an
-        # initial empty list on login, which would cause this wait to return
-        # immediately with stale data, so we snapshot the current cache value
-        # and wait for it to actually differ.
+        # waits for the next emission of the given event after the wrapped
+        # action runs. Each event slot has a paired threading.Event that the
+        # handler .set()s on arrival; we clear it before yielding (so any
+        # signal that fires during _call is captured by the subsequent wait)
+        # and .wait() after. This replaces a deepcopy + 10ms polling loop
+        # that did a full dict equality compare each tick — both O(monitors).
+        #
+        # AUTO_LOGIN is a one-shot fired during connect, possibly before the
+        # caller's `with` block ever runs; if it's already arrived, return
+        # immediately. Other events keep strict clear-then-wait semantics.
 
-        snapshot = deepcopy(self._event_data.get(event))
+        if event == Event.AUTO_LOGIN and self._event_data.get(event) is not None:
+            yield
+            return
+
+        signal = self._event_signals[event]
+        signal.clear()
         try:
             yield
         except:
             raise
         else:
-            timestamp = time.time()
-            while self._event_data[event] is None or self._event_data[event] == snapshot:
-                if time.time() - timestamp > self.timeout:
-                    raise Timeout(f"Timed out while waiting for event {event}")
-                time.sleep(0.01)
+            if not signal.wait(self.timeout):
+                raise Timeout(f"Timed out while waiting for event {event}")
 
     def _get_event_data(self, event) -> Any:
         monitor_events = [Event.AVG_PING, Event.UPTIME, Event.HEARTBEAT_LIST, Event.IMPORTANT_HEARTBEAT_LIST, Event.CERT_INFO, Event.HEARTBEAT]
@@ -567,7 +584,8 @@ class UptimeKumaApi(object):
                 return []
             time.sleep(0.01)
         time.sleep(self.wait_events)  # wait for multiple messages
-        return deepcopy(self._event_data[event].copy())
+        with self._event_lock:
+            return deepcopy(self._event_data[event])
 
     def _call(self, event, data=None) -> Any:
         r = self.sio.call(event, data, timeout=self.timeout)
@@ -586,117 +604,159 @@ class UptimeKumaApi(object):
         pass
 
     def _event_monitor_list(self, data) -> None:
-        self._event_data[Event.MONITOR_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.MONITOR_LIST] = data
+        self._event_signals[Event.MONITOR_LIST].set()
 
     def _event_notification_list(self, data) -> None:
-        self._event_data[Event.NOTIFICATION_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.NOTIFICATION_LIST] = data
+        self._event_signals[Event.NOTIFICATION_LIST].set()
 
     def _event_proxy_list(self, data) -> None:
-        self._event_data[Event.PROXY_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.PROXY_LIST] = data
+        self._event_signals[Event.PROXY_LIST].set()
 
     def _event_status_page_list(self, data) -> None:
-        self._event_data[Event.STATUS_PAGE_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.STATUS_PAGE_LIST] = data
+        self._event_signals[Event.STATUS_PAGE_LIST].set()
 
     def _event_heartbeat_list(self, monitor_id, data, overwrite) -> None:
         monitor_id = int(monitor_id)
-
-        if self._event_data[Event.HEARTBEAT_LIST] is None:
-            self._event_data[Event.HEARTBEAT_LIST] = {}
-        if monitor_id not in self._event_data[Event.HEARTBEAT_LIST] or overwrite:
-            self._event_data[Event.HEARTBEAT_LIST][monitor_id] = data
-        else:
-            self._event_data[Event.HEARTBEAT_LIST][monitor_id].append(data)
+        with self._event_lock:
+            if self._event_data[Event.HEARTBEAT_LIST] is None:
+                self._event_data[Event.HEARTBEAT_LIST] = {}
+            if monitor_id not in self._event_data[Event.HEARTBEAT_LIST] or overwrite:
+                self._event_data[Event.HEARTBEAT_LIST][monitor_id] = data
+            else:
+                self._event_data[Event.HEARTBEAT_LIST][monitor_id].append(data)
+        self._event_signals[Event.HEARTBEAT_LIST].set()
 
     def _event_important_heartbeat_list(self, monitor_id, data, overwrite) -> None:
         monitor_id = int(monitor_id)
-
-        if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
-            self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
-        if monitor_id not in self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] or overwrite:
-            self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id] = data
-        else:
-            self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id].append(data)
+        with self._event_lock:
+            if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
+                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
+            if monitor_id not in self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] or overwrite:
+                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id] = data
+            else:
+                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id].append(data)
+        self._event_signals[Event.IMPORTANT_HEARTBEAT_LIST].set()
 
     def _event_avg_ping(self, monitor_id, data) -> None:
         monitor_id = int(monitor_id)
-
-        if self._event_data[Event.AVG_PING] is None:
-            self._event_data[Event.AVG_PING] = {}
-        self._event_data[Event.AVG_PING][monitor_id] = data
+        with self._event_lock:
+            if self._event_data[Event.AVG_PING] is None:
+                self._event_data[Event.AVG_PING] = {}
+            self._event_data[Event.AVG_PING][monitor_id] = data
+        self._event_signals[Event.AVG_PING].set()
 
     def _event_uptime(self, monitor_id, type_, data) -> None:
         monitor_id = int(monitor_id)
-
-        if self._event_data[Event.UPTIME] is None:
-            self._event_data[Event.UPTIME] = {}
-        if monitor_id not in self._event_data[Event.UPTIME]:
-            self._event_data[Event.UPTIME][monitor_id] = {}
-        self._event_data[Event.UPTIME][monitor_id][type_] = data
+        with self._event_lock:
+            if self._event_data[Event.UPTIME] is None:
+                self._event_data[Event.UPTIME] = {}
+            if monitor_id not in self._event_data[Event.UPTIME]:
+                self._event_data[Event.UPTIME][monitor_id] = {}
+            self._event_data[Event.UPTIME][monitor_id][type_] = data
+        self._event_signals[Event.UPTIME].set()
 
     def _event_heartbeat(self, data) -> None:
-        if self._event_data[Event.HEARTBEAT_LIST] is None:
-            self._event_data[Event.HEARTBEAT_LIST] = {}
         monitor_id = data["monitorID"]
-        if monitor_id not in self._event_data[Event.HEARTBEAT_LIST]:
-            self._event_data[Event.HEARTBEAT_LIST][monitor_id] = []
-        self._event_data[Event.HEARTBEAT_LIST][monitor_id].append(data)
-        if len(self._event_data[Event.HEARTBEAT_LIST][monitor_id]) >= 150:
-            self._event_data[Event.HEARTBEAT_LIST][monitor_id].pop(0)
+        important = data.get("important", False)
+        with self._event_lock:
+            if self._event_data[Event.HEARTBEAT_LIST] is None:
+                self._event_data[Event.HEARTBEAT_LIST] = {}
+            hb_cache = self._event_data[Event.HEARTBEAT_LIST]
+            if monitor_id not in hb_cache:
+                hb_cache[monitor_id] = []
+            hb_cache[monitor_id].append(data)
+            if len(hb_cache[monitor_id]) >= 150:
+                hb_cache[monitor_id].pop(0)
 
-        # add heartbeat to important heartbeat list
-        if data["important"]:
-            if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
-                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
-            if monitor_id not in self._event_data[Event.IMPORTANT_HEARTBEAT_LIST]:
-                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id] = []
-            self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id] = [data] + self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id]
+            if important:
+                if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
+                    self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
+                imp_cache = self._event_data[Event.IMPORTANT_HEARTBEAT_LIST]
+                if monitor_id not in imp_cache:
+                    imp_cache[monitor_id] = []
+                imp_cache[monitor_id] = [data] + imp_cache[monitor_id]
+
+            self._event_data[Event.HEARTBEAT] = data
+        self._event_signals[Event.HEARTBEAT].set()
+        self._event_signals[Event.HEARTBEAT_LIST].set()
+        if important:
+            self._event_signals[Event.IMPORTANT_HEARTBEAT_LIST].set()
 
     def _event_info(self, data) -> None:
         if "version" not in data:
             # wait for the info event that is sent after login and contains the version
             return
-        self._event_data[Event.INFO] = data
+        with self._event_lock:
+            self._event_data[Event.INFO] = data
+        self._event_signals[Event.INFO].set()
 
     def _event_cert_info(self, monitor_id, data) -> None:
         monitor_id = int(monitor_id)
-
-        if self._event_data[Event.CERT_INFO] is None:
-            self._event_data[Event.CERT_INFO] = {}
-        self._event_data[Event.CERT_INFO][monitor_id] = json.loads(data)
+        with self._event_lock:
+            if self._event_data[Event.CERT_INFO] is None:
+                self._event_data[Event.CERT_INFO] = {}
+            self._event_data[Event.CERT_INFO][monitor_id] = json.loads(data)
+        self._event_signals[Event.CERT_INFO].set()
 
     def _event_docker_host_list(self, data) -> None:
-        self._event_data[Event.DOCKER_HOST_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.DOCKER_HOST_LIST] = data
+        self._event_signals[Event.DOCKER_HOST_LIST].set()
 
     def _event_auto_login(self) -> None:
-        self._event_data[Event.AUTO_LOGIN] = True
+        with self._event_lock:
+            self._event_data[Event.AUTO_LOGIN] = True
+        self._event_signals[Event.AUTO_LOGIN].set()
 
     def _event_init_server_timezone(self) -> None:
         pass
 
     def _event_maintenance_list(self, data) -> None:
-        self._event_data[Event.MAINTENANCE_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.MAINTENANCE_LIST] = data
+        self._event_signals[Event.MAINTENANCE_LIST].set()
 
     def _event_api_key_list(self, data) -> None:
-        self._event_data[Event.API_KEY_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.API_KEY_LIST] = data
+        self._event_signals[Event.API_KEY_LIST].set()
 
     def _event_remote_browser_list(self, data) -> None:
-        self._event_data[Event.REMOTE_BROWSER_LIST] = data
+        with self._event_lock:
+            self._event_data[Event.REMOTE_BROWSER_LIST] = data
+        self._event_signals[Event.REMOTE_BROWSER_LIST].set()
 
     def _event_update_monitor_into_list(self, data) -> None:
         # 2.x delta: {monitorID: monitor_dict} for one or more monitors
-        if self._event_data[Event.MONITOR_LIST] is None:
-            self._event_data[Event.MONITOR_LIST] = {}
-        if isinstance(data, dict):
-            self._event_data[Event.MONITOR_LIST].update(data)
+        with self._event_lock:
+            if self._event_data[Event.MONITOR_LIST] is None:
+                self._event_data[Event.MONITOR_LIST] = {}
+            if isinstance(data, dict):
+                self._event_data[Event.MONITOR_LIST].update(data)
+        # the delta IS the only signal for MONITOR_LIST on 2.x add/edit —
+        # wake any waiter blocked on Event.MONITOR_LIST.
+        self._event_signals[Event.MONITOR_LIST].set()
 
     def _event_delete_monitor_from_list(self, monitor_id) -> None:
         # 2.x delta: just the monitor id to remove
-        if self._event_data[Event.MONITOR_LIST] is None:
-            self._event_data[Event.MONITOR_LIST] = {}
-        # the server sends ids as ints; the cache may use stringified keys
-        for k in (monitor_id, str(monitor_id), int(monitor_id) if isinstance(monitor_id, str) and monitor_id.isdigit() else None):
-            if k is not None and k in self._event_data[Event.MONITOR_LIST]:
-                del self._event_data[Event.MONITOR_LIST][k]
+        with self._event_lock:
+            if self._event_data[Event.MONITOR_LIST] is None:
+                self._event_data[Event.MONITOR_LIST] = {}
+            cache = self._event_data[Event.MONITOR_LIST]
+            # the server sends ids as ints; the cache may use stringified keys
+            for k in (monitor_id, str(monitor_id), int(monitor_id) if isinstance(monitor_id, str) and monitor_id.isdigit() else None):
+                if k is not None and k in cache:
+                    del cache[k]
+                    break
+        self._event_signals[Event.MONITOR_LIST].set()
 
     # connection
 
@@ -2260,9 +2320,11 @@ class UptimeKumaApi(object):
         # so a subsequent get_status_pages() sees the new entry.
         try:
             config = self._call('getStatusPage', slug)["config"]
-            if self._event_data[Event.STATUS_PAGE_LIST] is None:
-                self._event_data[Event.STATUS_PAGE_LIST] = {}
-            self._event_data[Event.STATUS_PAGE_LIST][str(config["id"])] = config
+            with self._event_lock:
+                if self._event_data[Event.STATUS_PAGE_LIST] is None:
+                    self._event_data[Event.STATUS_PAGE_LIST] = {}
+                self._event_data[Event.STATUS_PAGE_LIST][str(config["id"])] = config
+            self._event_signals[Event.STATUS_PAGE_LIST].set()
         except Exception:
             pass
         return r
@@ -2285,12 +2347,16 @@ class UptimeKumaApi(object):
                 raise UptimeKumaException("status page does not exist")
             r = self._call('deleteStatusPage', slug)
 
-            # uptime kuma does not send the status page list event when a status page is deleted
-            for status_page in self._event_data[Event.STATUS_PAGE_LIST].values():
-                if status_page["slug"] == slug:
-                    status_page_id = status_page["id"]
-                    del self._event_data[Event.STATUS_PAGE_LIST][str(status_page_id)]
-                    break
+            # uptime kuma does not send the status page list event when a
+            # status page is deleted; manually evict the entry and trip the
+            # signal so wait_for_event unblocks.
+            with self._event_lock:
+                for status_page in self._event_data[Event.STATUS_PAGE_LIST].values():
+                    if status_page["slug"] == slug:
+                        status_page_id = status_page["id"]
+                        del self._event_data[Event.STATUS_PAGE_LIST][str(status_page_id)]
+                        break
+            self._event_signals[Event.STATUS_PAGE_LIST].set()
 
             return r
 
@@ -2363,9 +2429,11 @@ class UptimeKumaApi(object):
         # uptime kuma does not send the status page list event when a status page is saved
         status_page = self._call('getStatusPage', slug)["config"]
         status_page_id = status_page["id"]
-        if self._event_data[Event.STATUS_PAGE_LIST] is None:
-            self._event_data[Event.STATUS_PAGE_LIST] = {}
-        self._event_data[Event.STATUS_PAGE_LIST][str(status_page_id)] = status_page
+        with self._event_lock:
+            if self._event_data[Event.STATUS_PAGE_LIST] is None:
+                self._event_data[Event.STATUS_PAGE_LIST] = {}
+            self._event_data[Event.STATUS_PAGE_LIST][str(status_page_id)] = status_page
+        self._event_signals[Event.STATUS_PAGE_LIST].set()
 
         return r
 
