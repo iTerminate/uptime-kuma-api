@@ -6,6 +6,7 @@ import random
 import string
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
@@ -585,7 +586,13 @@ class UptimeKumaApi(object):
             time.sleep(0.01)
         time.sleep(self.wait_events)  # wait for multiple messages
         with self._event_lock:
-            return deepcopy(self._event_data[event])
+            data = self._event_data[event]
+            # heartbeat lists are stored as bounded deques; convert to plain
+            # lists at the boundary so external callers see the same shape
+            # they always have.
+            if event in (Event.HEARTBEAT_LIST, Event.IMPORTANT_HEARTBEAT_LIST) and isinstance(data, dict):
+                data = {mid: list(v) for mid, v in data.items()}
+            return deepcopy(data)
 
     def _call(self, event, data=None) -> Any:
         r = self.sio.call(event, data, timeout=self.timeout)
@@ -628,10 +635,11 @@ class UptimeKumaApi(object):
         with self._event_lock:
             if self._event_data[Event.HEARTBEAT_LIST] is None:
                 self._event_data[Event.HEARTBEAT_LIST] = {}
-            if monitor_id not in self._event_data[Event.HEARTBEAT_LIST] or overwrite:
-                self._event_data[Event.HEARTBEAT_LIST][monitor_id] = data
+            cache = self._event_data[Event.HEARTBEAT_LIST]
+            if monitor_id not in cache or overwrite:
+                cache[monitor_id] = deque(data, maxlen=150)
             else:
-                self._event_data[Event.HEARTBEAT_LIST][monitor_id].append(data)
+                cache[monitor_id].extend(data)
         self._event_signals[Event.HEARTBEAT_LIST].set()
 
     def _event_important_heartbeat_list(self, monitor_id, data, overwrite) -> None:
@@ -639,10 +647,13 @@ class UptimeKumaApi(object):
         with self._event_lock:
             if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
                 self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
-            if monitor_id not in self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] or overwrite:
-                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id] = data
+            cache = self._event_data[Event.IMPORTANT_HEARTBEAT_LIST]
+            # 500 matches the upstream server cap; deque(maxlen=) bounds it
+            # automatically and makes appendleft O(1).
+            if monitor_id not in cache or overwrite:
+                cache[monitor_id] = deque(data, maxlen=500)
             else:
-                self._event_data[Event.IMPORTANT_HEARTBEAT_LIST][monitor_id].append(data)
+                cache[monitor_id].extend(data)
         self._event_signals[Event.IMPORTANT_HEARTBEAT_LIST].set()
 
     def _event_avg_ping(self, monitor_id, data) -> None:
@@ -671,18 +682,16 @@ class UptimeKumaApi(object):
                 self._event_data[Event.HEARTBEAT_LIST] = {}
             hb_cache = self._event_data[Event.HEARTBEAT_LIST]
             if monitor_id not in hb_cache:
-                hb_cache[monitor_id] = []
+                hb_cache[monitor_id] = deque(maxlen=150)
             hb_cache[monitor_id].append(data)
-            if len(hb_cache[monitor_id]) >= 150:
-                hb_cache[monitor_id].pop(0)
 
             if important:
                 if self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] is None:
                     self._event_data[Event.IMPORTANT_HEARTBEAT_LIST] = {}
                 imp_cache = self._event_data[Event.IMPORTANT_HEARTBEAT_LIST]
                 if monitor_id not in imp_cache:
-                    imp_cache[monitor_id] = []
-                imp_cache[monitor_id] = [data] + imp_cache[monitor_id]
+                    imp_cache[monitor_id] = deque(maxlen=500)
+                imp_cache[monitor_id].appendleft(data)
 
             self._event_data[Event.HEARTBEAT] = data
         self._event_signals[Event.HEARTBEAT].set()
