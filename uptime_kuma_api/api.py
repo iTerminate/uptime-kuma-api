@@ -611,6 +611,10 @@ class UptimeKumaApi(object):
         pass
 
     def _event_monitor_list(self, data) -> None:
+        # normalize monitor-id keys to int — server may emit ints or strs
+        # and we want one canonical type so deltas merge cleanly.
+        if isinstance(data, dict):
+            data = {int(k): v for k, v in data.items()}
         with self._event_lock:
             self._event_data[Event.MONITOR_LIST] = data
         self._event_signals[Event.MONITOR_LIST].set()
@@ -744,24 +748,33 @@ class UptimeKumaApi(object):
         self._event_signals[Event.REMOTE_BROWSER_LIST].set()
 
     def _event_update_monitor_into_list(self, data) -> None:
-        # 2.x delta: {monitorID: monitor_dict} for one or more monitors
+        # 2.x delta: {monitorID: monitor_dict} for one or more monitors.
+        # Normalize keys to int to match the canonical form set by
+        # _event_monitor_list.
+        if not isinstance(data, dict):
+            return
+        data = {int(k): v for k, v in data.items()}
         with self._event_lock:
             if self._event_data[Event.MONITOR_LIST] is None:
                 self._event_data[Event.MONITOR_LIST] = {}
-            if isinstance(data, dict):
-                self._event_data[Event.MONITOR_LIST].update(data)
+            self._event_data[Event.MONITOR_LIST].update(data)
         # the delta IS the only signal for MONITOR_LIST on 2.x add/edit —
         # wake any waiter blocked on Event.MONITOR_LIST.
         self._event_signals[Event.MONITOR_LIST].set()
 
     def _event_delete_monitor_from_list(self, monitor_id) -> None:
-        # 2.x delta: just the monitor id to remove
+        # 2.x delta: just the monitor id to remove.
+        try:
+            monitor_id_int = int(monitor_id)
+        except (TypeError, ValueError):
+            monitor_id_int = None
         with self._event_lock:
             if self._event_data[Event.MONITOR_LIST] is None:
                 self._event_data[Event.MONITOR_LIST] = {}
             cache = self._event_data[Event.MONITOR_LIST]
-            # the server sends ids as ints; the cache may use stringified keys
-            for k in (monitor_id, str(monitor_id), int(monitor_id) if isinstance(monitor_id, str) and monitor_id.isdigit() else None):
+            # cache is normalized to int keys post-fix, but tolerate str/raw
+            # values in case any pre-existing entry slipped through.
+            for k in (monitor_id_int, monitor_id, str(monitor_id)):
                 if k is not None and k in cache:
                     del cache[k]
                     break
@@ -1785,7 +1798,8 @@ class UptimeKumaApi(object):
         """
         r = self._call('addMonitorTag', (tag_id, monitor_id, value))
         # the monitor list event does not send the updated tags
-        self._event_data[Event.MONITOR_LIST][str(monitor_id)] = self.get_monitor(monitor_id)
+        with self._event_lock:
+            self._event_data[Event.MONITOR_LIST][int(monitor_id)] = self.get_monitor(monitor_id)
         return r
 
     # editMonitorTag is unused in uptime-kuma
@@ -1828,7 +1842,8 @@ class UptimeKumaApi(object):
                 raise UptimeKumaException("monitor tag does not exist")
             r = self._call('deleteMonitorTag', (tag_id, monitor_id, value))
             # the monitor list event does not send the updated tags
-            self._event_data[Event.MONITOR_LIST][str(monitor_id)] = self.get_monitor(monitor_id)
+            with self._event_lock:
+                self._event_data[Event.MONITOR_LIST][int(monitor_id)] = self.get_monitor(monitor_id)
             return r
 
     # notification
